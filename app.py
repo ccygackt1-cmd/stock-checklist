@@ -398,9 +398,12 @@ if st.button("開始檢查"):
     with st.spinner("正在核對 TWSE 開休市日期、成交資料與法人資料..."):
         stock_days = get_verified_stock_days(code, needed=40, end_day=end_day)
 
-    if len(stock_days) < 5:
-        st.error("可驗證的交易日少於 5 天，請確認股票代號或稍後再試。")
-        st.stop()
+    if len(stock_days) == 0:
+    st.error("查不到這檔股票資料，請確認股票代號是否正確，或這檔不是上市股。")
+    st.stop()
+
+if len(stock_days) < 5:
+    st.warning(f"目前只抓到 {len(stock_days)} 個交易日，資料不足，先顯示現有內容。")
 
     stock_hist = [normalize_stock_row(item["date"], item["stock"]) for item in stock_days]
     hist_df = pd.DataFrame(stock_hist).sort_values("date").reset_index(drop=True)
