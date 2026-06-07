@@ -9,6 +9,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
+# =========================
+# 基本設定
+# =========================
 TZ = ZoneInfo("Asia/Taipei")
 OPENAPI = "https://openapi.twse.com.tw/v1"
 TWSE = "https://www.twse.com.tw"
@@ -42,23 +45,29 @@ st.markdown(
 .status-green { background: linear-gradient(135deg, #16a34a, #22c55e); }
 .status-yellow { background: linear-gradient(135deg, #d97706, #f59e0b); }
 .status-red { background: linear-gradient(135deg, #dc2626, #ef4444); }
-.metric-card {
-    border-radius: 16px;
-    padding: 16px 16px;
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-}
 .small-label { font-size: 0.85rem; color: #64748b; margin-bottom: 4px; }
 .big-value { font-size: 1.35rem; font-weight: 800; color: #0f172a; }
 .good { color: #16a34a; font-weight: 700; }
 .warn { color: #d97706; font-weight: 700; }
 .bad  { color: #dc2626; font-weight: 700; }
+.warn-box {
+    background: #fff7ed;
+    border: 1px solid #fdba74;
+    color: #9a3412;
+    padding: 12px 14px;
+    border-radius: 12px;
+    margin-top: 10px;
+    line-height: 1.6;
+    font-size: 14px;
+}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
+# =========================
+# 工具函式
+# =========================
 def to_float(x):
     if x is None:
         return None
@@ -71,10 +80,12 @@ def to_float(x):
     except Exception:
         return None
 
+
 def fmt_price(x):
     if x is None or pd.isna(x):
         return "-"
     return f"{x:,.2f}"
+
 
 def fmt_num(x, nd=1):
     if x is None or pd.isna(x):
@@ -84,6 +95,7 @@ def fmt_num(x, nd=1):
     except Exception:
         return str(x)
 
+
 def fmt_int(x):
     if x is None or pd.isna(x):
         return "-"
@@ -92,12 +104,14 @@ def fmt_int(x):
     except Exception:
         return str(x)
 
+
 def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     return df
+
 
 def get_by_keywords(row: dict, include: list[str], exclude: list[str] | None = None):
     exclude = exclude or []
@@ -106,6 +120,7 @@ def get_by_keywords(row: dict, include: list[str], exclude: list[str] | None = N
         if all(t in ks for t in include) and not any(e in ks for e in exclude):
             return v
     return None
+
 
 def find_code_row(df: pd.DataFrame, code: str):
     if df is None or df.empty:
@@ -118,6 +133,7 @@ def find_code_row(df: pd.DataFrame, code: str):
         c for c in df.columns
         if any(t in str(c) for t in ["證券代號", "股票代號", "證券代碼", "代號"])
     ]
+
     for col in preferred_cols:
         try:
             hit = df[df[col].astype(str).str.strip() == code]
@@ -136,9 +152,22 @@ def find_code_row(df: pd.DataFrame, code: str):
 
     return None
 
+
 def roc_year(greg_date: date) -> int:
     return greg_date.year - 1911
 
+
+def date_to_yyyymmdd(d: date) -> str:
+    return d.strftime("%Y%m%d")
+
+
+def date_to_iso(d: date) -> str:
+    return d.strftime("%Y-%m-%d")
+
+
+# =========================
+# 官方資料抓取
+# =========================
 @st.cache_data(ttl=24 * 3600)
 def get_holiday_set(roc_year_num: int) -> set[date]:
     url = f"{TWSE}/holidaySchedule/holidaySchedule?queryYear={roc_year_num}&response=html"
@@ -146,6 +175,7 @@ def get_holiday_set(roc_year_num: int) -> set[date]:
         tables = pd.read_html(url)
         if not tables:
             return set()
+
         df = clean_columns(tables[0])
         date_col = None
         for c in df.columns:
@@ -154,31 +184,35 @@ def get_holiday_set(roc_year_num: int) -> set[date]:
                 break
         if date_col is None:
             date_col = df.columns[0]
+
         dates = pd.to_datetime(df[date_col], errors="coerce").dt.date
         return set([d for d in dates if pd.notna(d)])
     except Exception:
         return set()
+
 
 def is_trading_day(d: date) -> bool:
     if d.weekday() >= 5:
         return False
     return d not in get_holiday_set(roc_year(d))
 
+
 @st.cache_data(ttl=3600)
 def fetch_stock_day_all_df(d: date) -> pd.DataFrame:
     try:
         r = SESSION.get(
             f"{OPENAPI}/exchangeReport/STOCK_DAY_ALL",
-            params={"date": d.strftime("%Y%m%d")},
+            params={"date": date_to_yyyymmdd(d)},
             timeout=20,
         )
         r.raise_for_status()
         j = r.json()
         if isinstance(j, dict) and "data" in j and "fields" in j:
             return clean_columns(pd.DataFrame(j["data"], columns=j["fields"]))
-        return pd.DataFrame()
     except Exception:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
+
 
 @st.cache_data(ttl=3600)
 def fetch_bwibbu_df(d: date) -> pd.DataFrame:
@@ -186,7 +220,7 @@ def fetch_bwibbu_df(d: date) -> pd.DataFrame:
         try:
             r = SESSION.get(
                 f"{OPENAPI}/exchangeReport/{endpoint}",
-                params={"date": d.strftime("%Y%m%d")} if endpoint == "BWIBBU_d" else None,
+                params={"date": date_to_yyyymmdd(d)} if endpoint == "BWIBBU_d" else None,
                 timeout=20,
             )
             r.raise_for_status()
@@ -199,10 +233,11 @@ def fetch_bwibbu_df(d: date) -> pd.DataFrame:
             continue
     return pd.DataFrame()
 
+
 def _parse_t86_json_to_row(d: date, code: str):
     urls = [
-        (f"{TWSE}/fund/T86", {"date": d.strftime("%Y%m%d"), "response": "json", "selectType": "ALLBUT0999"}),
-        (f"{TWSE}/rwd/zh/fund/T86", {"date": d.strftime("%Y%m%d"), "response": "json", "selectType": "ALLBUT0999"}),
+        (f"{TWSE}/rwd/zh/fund/T86", {"date": date_to_yyyymmdd(d), "response": "json", "selectType": "ALLBUT0999"}),
+        (f"{TWSE}/fund/T86", {"date": date_to_yyyymmdd(d), "response": "json", "selectType": "ALLBUT0999"}),
     ]
     for url, params in urls:
         try:
@@ -218,10 +253,11 @@ def _parse_t86_json_to_row(d: date, code: str):
             continue
     return None
 
+
 def _parse_t86_html_to_row(d: date, code: str):
     urls = [
-        (f"{TWSE}/fund/T86", {"date": d.strftime("%Y%m%d"), "response": "html", "selectType": "ALLBUT0999"}),
-        (f"{TWSE}/rwd/zh/fund/T86", {"date": d.strftime("%Y%m%d"), "response": "html", "selectType": "ALLBUT0999"}),
+        (f"{TWSE}/rwd/zh/fund/T86", {"date": date_to_yyyymmdd(d), "response": "html", "selectType": "ALLBUT0999"}),
+        (f"{TWSE}/fund/T86", {"date": date_to_yyyymmdd(d), "response": "html", "selectType": "ALLBUT0999"}),
     ]
     for url, params in urls:
         try:
@@ -237,12 +273,14 @@ def _parse_t86_html_to_row(d: date, code: str):
             continue
     return None
 
+
 @st.cache_data(ttl=1800)
 def fetch_t86_row(d: date, code: str):
     row = _parse_t86_json_to_row(d, code)
     if row is not None:
         return row
     return _parse_t86_html_to_row(d, code)
+
 
 @st.cache_data(ttl=1800)
 def fetch_stock_row(d: date, code: str):
@@ -252,6 +290,7 @@ def fetch_stock_row(d: date, code: str):
     row = find_code_row(df, code)
     return None if row is None else row.to_dict()
 
+
 @st.cache_data(ttl=1800)
 def fetch_bwibbu_row(d: date, code: str):
     df = fetch_bwibbu_df(d)
@@ -260,38 +299,10 @@ def fetch_bwibbu_row(d: date, code: str):
     row = find_code_row(df, code)
     return None if row is None else row.to_dict()
 
-def get_verified_stock_days(code: str, needed: int, end_day: date) -> list[dict]:
-    out = []
-    cursor = end_day
-    tries = 0
 
-    while len(out) < needed and tries < 240:
-        tries += 1
-        if is_trading_day(cursor):
-            row = fetch_stock_row(cursor, code)
-            if row is not None:
-                out.append({"date": cursor, "stock": row})
-        cursor -= timedelta(days=1)
-
-    return list(reversed(out))
-
-def get_verified_inst_days(code: str, stock_days: list[dict], needed: int = 5) -> list[dict]:
-    out = []
-    for item in reversed(stock_days):
-        row = fetch_t86_row(item["date"], code)
-        if row is not None:
-            out.append({"date": item["date"], "stock": item["stock"], "t86": row})
-            if len(out) >= needed:
-                break
-    return list(reversed(out))
-
-def get_latest_valuation(code: str, stock_days: list[dict]):
-    for item in reversed(stock_days):
-        row = fetch_bwibbu_row(item["date"], code)
-        if row is not None:
-            return item["date"], row
-    return None, None
-
+# =========================
+# 資料整理
+# =========================
 def normalize_stock_row(d: date, row: dict):
     code = (
         get_by_keywords(row, ["證券代號"])
@@ -320,12 +331,14 @@ def normalize_stock_row(d: date, row: dict):
         "change": get_by_keywords(row, ["漲跌價差"]) or get_by_keywords(row, ["漲跌"]) or "-",
     }
 
+
 def normalize_val_row(row: dict):
     return {
         "pe": to_float(get_by_keywords(row, ["本益比"])),
         "dividend_yield": to_float(get_by_keywords(row, ["殖利率"])),
         "pb": to_float(get_by_keywords(row, ["股價淨值比"])),
     }
+
 
 def normalize_t86_row(row: dict):
     foreign_buy = to_float(get_by_keywords(row, ["外資", "買進"]))
@@ -347,6 +360,7 @@ def normalize_t86_row(row: dict):
     dealer_total_buy = None
     dealer_total_sell = None
     dealer_net = None
+
     if dealer_buy is not None or hedge_buy is not None:
         dealer_total_buy = (dealer_buy or 0) + (hedge_buy or 0)
         dealer_total_sell = (dealer_sell or 0) + (hedge_sell or 0)
@@ -369,14 +383,54 @@ def normalize_t86_row(row: dict):
         "total_diff_lot": to_lot(total_diff),
     }
 
+
 def moving_average(values, n):
     out = []
     for i in range(len(values)):
-        arr = values[max(0, i-n+1):i+1]
+        arr = values[max(0, i - n + 1) : i + 1]
         arr = [v for v in arr if v is not None]
         out.append(sum(arr) / n if len(arr) == n else None)
     return out
 
+
+def get_verified_stock_days(code: str, needed: int, end_day: date):
+    out = []
+    cursor = end_day
+    tries = 0
+
+    while len(out) < needed and tries < 260:
+        tries += 1
+        if is_trading_day(cursor):
+            row = fetch_stock_row(cursor, code)
+            if row is not None:
+                out.append({"date": cursor, "stock": row})
+        cursor -= timedelta(days=1)
+
+    return list(reversed(out))
+
+
+def get_verified_inst_days(code: str, stock_days: list[dict], needed: int = 5):
+    out = []
+    for item in reversed(stock_days):
+        row = fetch_t86_row(item["date"], code)
+        if row is not None:
+            out.append({"date": item["date"], "stock": item["stock"], "t86": row})
+            if len(out) >= needed:
+                break
+    return list(reversed(out))
+
+
+def get_latest_valuation(code: str, stock_days: list[dict]):
+    for item in reversed(stock_days):
+        row = fetch_bwibbu_row(item["date"], code)
+        if row is not None:
+            return item["date"], row
+    return None, None
+
+
+# =========================
+# UI
+# =========================
 st.title("📋 下單前檢查表")
 st.caption("輸入股票代號，先看完重點再決定要不要下單。")
 
@@ -396,12 +450,18 @@ if st.button("開始檢查"):
         st.stop()
 
     with st.spinner("正在核對 TWSE 開休市日期、成交資料與法人資料..."):
-        stock_days = get_verified_stock_days(code, needed=40, end_day=end_day)
+        stock_days = get_verified_stock_days(code, needed=20, end_day=end_day)
 
-    if len(stock_days) < 5:
-        st.error("可驗證的交易日少於 5 天，請確認股票代號或稍後再試。")
+    warnings = []
+
+    if len(stock_days) == 0:
+        st.error("查不到這檔股票資料，請確認股票代號是否正確，或這檔不是上市股。")
         st.stop()
 
+    if len(stock_days) < 5:
+        warnings.append(f"目前只抓到 {len(stock_days)} 個交易日，資料不足 5 天，但我先幫你顯示已有內容。")
+
+    # 股票資料
     stock_hist = [normalize_stock_row(item["date"], item["stock"]) for item in stock_days]
     hist_df = pd.DataFrame(stock_hist).sort_values("date").reset_index(drop=True)
 
@@ -418,33 +478,46 @@ if st.button("開始檢查"):
     latest_code = latest.get("code", code)
     latest_name = latest.get("name", "")
 
+    # 估值資料
     val_date, val_row = get_latest_valuation(code, stock_days)
     val_dict = normalize_val_row(val_row) if val_row else {}
+    if not val_dict:
+        warnings.append("估值資料暫時抓不到（本益比 / 殖利率 / 股價淨值比）。")
 
+    # 法人資料
     inst_days = get_verified_inst_days(code, stock_days, needed=5)
     inst_rows = []
     for item in inst_days:
         inst_rows.append({"date": item["date"], **normalize_t86_row(item["t86"])})
     inst_df = pd.DataFrame(inst_rows).sort_values("date").reset_index(drop=True)
 
-    score = 0
-    score_items = []
+    if inst_df.empty:
+        warnings.append("法人資料暫時抓不到，可能是資料尚未更新或資料源異動。")
 
-    cond_ma = pd.notna(latest.get("close")) and pd.notna(latest.get("MA5")) and pd.notna(latest.get("MA20")) and latest["close"] >= latest["MA5"] >= latest["MA20"]
-    cond_vol = len(hist_df) >= 20 and pd.notna(latest.get("volume")) and latest["volume"] >= hist_df["volume"].tail(20).mean()
+    # 快速判讀
+    cond_ma = (
+        pd.notna(latest.get("close"))
+        and pd.notna(latest.get("MA5"))
+        and pd.notna(latest.get("MA20"))
+        and latest["close"] >= latest["MA5"] >= latest["MA20"]
+    )
+
+    vol20 = hist_df["volume"].tail(20).dropna().tolist() if "volume" in hist_df.columns else []
+    avg20 = sum(vol20) / len(vol20) if vol20 else None
+    cond_vol = pd.notna(latest.get("volume")) and avg20 is not None and latest["volume"] >= avg20
+
     cond_foreign = (not inst_df.empty) and ("foreign_net_lot" in inst_df.columns) and inst_df["foreign_net_lot"].sum(skipna=True) > 0
     cond_trust = (not inst_df.empty) and ("trust_net_lot" in inst_df.columns) and inst_df["trust_net_lot"].sum(skipna=True) > 0
     cond_dealer = (not inst_df.empty) and ("dealer_net_lot" in inst_df.columns) and inst_df["dealer_net_lot"].sum(skipna=True) > 0
 
-    for label, cond in [
+    score_items = [
         ("站上 MA5 / MA20", cond_ma),
-        ("量能是否大於 20 日均量", cond_vol),
-        ("近 5 日外資是否偏買", cond_foreign),
-        ("近 5 日投信是否偏買", cond_trust),
-        ("近 5 日自營商是否偏買", cond_dealer),
-    ]:
-        score_items.append((label, cond))
-        score += 1 if cond else 0
+        ("成交量高於 20 日均量", cond_vol),
+        ("近 5 日外資偏買", cond_foreign),
+        ("近 5 日投信偏買", cond_trust),
+        ("近 5 日自營商偏買", cond_dealer),
+    ]
+    score = sum(1 for _, ok in score_items if ok)
 
     if score >= 4:
         status_class = "status-green"
@@ -458,7 +531,9 @@ if st.button("開始檢查"):
 
     st.markdown(f'<div class="status-box {status_class}">{status_text}</div>', unsafe_allow_html=True)
 
+    # 一眼看完
     st.subheader("🔍 一眼檢查")
+
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("股票代號", str(latest_code))
     c2.metric("股票名稱", str(latest_name))
@@ -480,6 +555,7 @@ if st.button("開始檢查"):
     for label, cond in score_items:
         st.write(f"- {'🟢' if cond else '🔴'} {label}")
 
+    # 走勢資料
     st.write("### 📊 近 20 個已驗證交易日資料")
     show_hist = hist_df[["date", "close", "volume", "MA5", "MA10", "MA20"]].copy()
     show_hist["date"] = show_hist["date"].astype(str)
@@ -495,6 +571,7 @@ if st.button("開始檢查"):
     )
     st.dataframe(show_hist, use_container_width=True)
 
+    # 估值資料
     st.write("### 🧾 估值資料")
     if val_dict:
         val_show = pd.DataFrame(
@@ -511,6 +588,7 @@ if st.button("開始檢查"):
     else:
         st.info("目前抓不到估值資料，可能該標的當天尚未更新或資料源暫時沒有回傳。")
 
+    # 法人資料
     st.write("### 🏦 前五個營業日法人買賣張數（張）")
     if not inst_df.empty:
         inst_show = inst_df.copy()
@@ -538,6 +616,7 @@ if st.button("開始檢查"):
     else:
         st.info("目前抓不到法人資料。")
 
+    # 當沖底線
     st.write("### 🧯 當沖底線試算")
     if entry_price and entry_price > 0:
         stop_price = entry_price * (1 - stop_loss_pct / 100.0)
@@ -553,6 +632,7 @@ if st.button("開始檢查"):
 
     st.caption("這裡的停損是風控參考值，不是官方規定。")
 
+    # 資料核對
     st.write("### 🧪 資料核對說明")
     st.write(f"- 已驗證的交易日數：`{len(stock_days)}`")
     st.write(f"- 最新股票資料日：`{str(latest_date)}`")
@@ -561,6 +641,21 @@ if st.button("開始檢查"):
     if not inst_df.empty:
         st.write(f"- 最新法人資料日：`{str(inst_df.iloc[-1]['date'])}`")
 
+    if str(latest_date) != str(end_day):
+        st.info("你選的截至日期不是可直接使用的最新交易日，工具已自動回退到最近一個可驗證交易日。")
+
+    if warnings:
+        st.markdown(
+            """
+<div class="warn-box">
+<b>資料來源提醒</b><br>
+{}
+</div>
+""".format("<br>".join([f"• {w}" for w in warnings])),
+            unsafe_allow_html=True,
+        )
+
+    # 下載
     csv_hist = show_hist.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
         "⬇️ 下載近 20 日檢查表 CSV",
