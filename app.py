@@ -131,7 +131,7 @@ def find_code_row(df: pd.DataFrame, code: str):
 
     preferred_cols = [
         c for c in df.columns
-        if any(t in str(c) for t in ["證券代號", "股票代號", "證券代碼", "代號"])
+        if any(t in str(c) for t in ["證券代號", "股票代號", "證券代碼", "代號", "Security Code", "Securities Code", "Code"])
     ]
 
     for col in preferred_cols:
@@ -214,6 +214,33 @@ def fetch_stock_day_all_df(d: date) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+@st.cache_data(ttl=1800)
+def fetch_etf_daily_df(d: date) -> pd.DataFrame:
+    """
+    TWSE ETF 日成交資訊
+    官方有 ETF 專頁與 ETFReport/ETFDaily 頁面，0050 這類 ETF 會走這條。
+    """
+    urls = [
+        f"{TWSE}/zh/ETFReport/ETFDaily",
+        f"{TWSE}/en/ETFReport/ETFDaily",
+    ]
+    for url in urls:
+        try:
+            r = SESSION.get(
+                url,
+                params={"date": date_to_yyyymmdd(d), "response": "html"},
+                timeout=20,
+            )
+            r.raise_for_status()
+            tables = pd.read_html(StringIO(r.text))
+            if tables:
+                # 合併所有表，後續用 code 去找
+                return pd.concat([clean_columns(tb) for tb in tables if not tb.empty], ignore_index=True)
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
 @st.cache_data(ttl=3600)
 def fetch_bwibbu_df(d: date) -> pd.DataFrame:
     for endpoint in ["BWIBBU_d", "BWIBBU_ALL"]:
@@ -284,11 +311,23 @@ def fetch_t86_row(d: date, code: str):
 
 @st.cache_data(ttl=1800)
 def fetch_stock_row(d: date, code: str):
+    """
+    先找一般上市股票，再找 ETF。
+    回傳 (row_dict, source_type)；source_type = STOCK / ETF
+    """
     df = fetch_stock_day_all_df(d)
-    if df.empty:
-        return None
-    row = find_code_row(df, code)
-    return None if row is None else row.to_dict()
+    if not df.empty:
+        row = find_code_row(df, code)
+        if row is not None:
+            return row.to_dict(), "STOCK"
+
+    etf_df = fetch_etf_daily_df(d)
+    if not etf_df.empty:
+        row = find_code_row(etf_df, code)
+        if row is not None:
+            return row.to_dict(), "ETF"
+
+    return None, None
 
 
 @st.cache_data(ttl=1800)
@@ -303,53 +342,92 @@ def fetch_bwibbu_row(d: date, code: str):
 # =========================
 # 資料整理
 # =========================
-def normalize_stock_row(d: date, row: dict):
+def normalize_stock_row(d: date, row: dict, source_type: str | None = None):
     code = (
         get_by_keywords(row, ["證券代號"])
         or get_by_keywords(row, ["股票代號"])
+        or get_by_keywords(row, ["Security Code"])
+        or get_by_keywords(row, ["Securities Code"])
+        or get_by_keywords(row, ["Code"])
         or get_by_keywords(row, ["代號"])
         or ""
     )
     name = (
         get_by_keywords(row, ["證券名稱"])
         or get_by_keywords(row, ["股票名稱"])
-        or get_by_keywords(row, ["名稱"])
+        or get_by_keywords(row, ["Security Name"])
+        or get_by_keywords(row, ["Name"])
         or ""
     )
 
     return {
         "date": d,
+        "source": source_type or "",
         "code": str(code).strip(),
         "name": str(name).strip(),
-        "open": to_float(get_by_keywords(row, ["開盤價"])),
-        "high": to_float(get_by_keywords(row, ["最高價"])),
-        "low": to_float(get_by_keywords(row, ["最低價"])),
-        "close": to_float(get_by_keywords(row, ["收盤價"])),
-        "volume": to_float(get_by_keywords(row, ["成交股數"])),
-        "trades": to_float(get_by_keywords(row, ["成交筆數"])),
-        "amount": to_float(get_by_keywords(row, ["成交金額"])),
-        "change": get_by_keywords(row, ["漲跌價差"]) or get_by_keywords(row, ["漲跌"]) or "-",
+        "open": to_float(get_by_keywords(row, ["開盤價"]) or get_by_keywords(row, ["Opening Price"])),
+        "high": to_float(get_by_keywords(row, ["最高價"]) or get_by_keywords(row, ["Highest Price"])),
+        "low": to_float(get_by_keywords(row, ["最低價"]) or get_by_keywords(row, ["Lowest Price"])),
+        "close": to_float(get_by_keywords(row, ["收盤價"]) or get_by_keywords(row, ["Closing Price"])),
+        "volume": to_float(
+            get_by_keywords(row, ["成交股數"])
+            or get_by_keywords(row, ["Trading Volume(Share)"])
+            or get_by_keywords(row, ["Trading Volume"])
+        ),
+        "trades": to_float(get_by_keywords(row, ["成交筆數"]) or get_by_keywords(row, ["Transactions"]) or get_by_keywords(row, ["No. of Trades"])),
+        "amount": to_float(get_by_keywords(row, ["成交金額"]) or get_by_keywords(row, ["Trading Value"])),
+        "change": get_by_keywords(row, ["漲跌價差"]) or get_by_keywords(row, ["漲跌"]) or get_by_keywords(row, ["Change"]) or "-",
     }
 
 
 def normalize_val_row(row: dict):
     return {
-        "pe": to_float(get_by_keywords(row, ["本益比"])),
-        "dividend_yield": to_float(get_by_keywords(row, ["殖利率"])),
-        "pb": to_float(get_by_keywords(row, ["股價淨值比"])),
+        "pe": to_float(get_by_keywords(row, ["本益比"]) or get_by_keywords(row, ["P/E"])),
+        "dividend_yield": to_float(get_by_keywords(row, ["殖利率"]) or get_by_keywords(row, ["dividend"])),
+        "pb": to_float(get_by_keywords(row, ["股價淨值比"]) or get_by_keywords(row, ["P/B"])),
     }
 
 
 def normalize_t86_row(row: dict):
-    foreign_buy = to_float(get_by_keywords(row, ["外資", "買進"]))
-    foreign_sell = to_float(get_by_keywords(row, ["外資", "賣出"]))
-    trust_buy = to_float(get_by_keywords(row, ["投信", "買進"]))
-    trust_sell = to_float(get_by_keywords(row, ["投信", "賣出"]))
-    dealer_buy = to_float(get_by_keywords(row, ["自營商", "買進"], exclude=["避險"]))
-    dealer_sell = to_float(get_by_keywords(row, ["自營商", "賣出"], exclude=["避險"]))
-    hedge_buy = to_float(get_by_keywords(row, ["自營商", "避險", "買進"]))
-    hedge_sell = to_float(get_by_keywords(row, ["自營商", "避險", "賣出"]))
-    total_diff = to_float(get_by_keywords(row, ["買賣超"]) or get_by_keywords(row, ["總差額"]))
+    foreign_buy = to_float(
+        get_by_keywords(row, ["外資", "買進"])
+        or get_by_keywords(row, ["Foreign", "Total Buy"])
+        or get_by_keywords(row, ["Foreign Investors", "Total Buy"])
+    )
+    foreign_sell = to_float(
+        get_by_keywords(row, ["外資", "賣出"])
+        or get_by_keywords(row, ["Foreign", "Total Sell"])
+        or get_by_keywords(row, ["Foreign Investors", "Total Sell"])
+    )
+    trust_buy = to_float(
+        get_by_keywords(row, ["投信", "買進"])
+        or get_by_keywords(row, ["Securities Investment Trust Companies", "Total Buy"])
+    )
+    trust_sell = to_float(
+        get_by_keywords(row, ["投信", "賣出"])
+        or get_by_keywords(row, ["Securities Investment Trust Companies", "Total Sell"])
+    )
+    dealer_buy = to_float(
+        get_by_keywords(row, ["自營商", "買進"], exclude=["避險"])
+        or get_by_keywords(row, ["Dealers (Proprietary)", "Total Buy"])
+    )
+    dealer_sell = to_float(
+        get_by_keywords(row, ["自營商", "賣出"], exclude=["避險"])
+        or get_by_keywords(row, ["Dealers (Proprietary)", "Total Sell"])
+    )
+    hedge_buy = to_float(
+        get_by_keywords(row, ["自營商", "避險", "買進"])
+        or get_by_keywords(row, ["Dealers (Hedge)", "Total Buy"])
+    )
+    hedge_sell = to_float(
+        get_by_keywords(row, ["自營商", "避險", "賣出"])
+        or get_by_keywords(row, ["Dealers (Hedge)", "Total Sell"])
+    )
+    total_diff = to_float(
+        get_by_keywords(row, ["買賣超"])
+        or get_by_keywords(row, ["總差額"])
+        or get_by_keywords(row, ["Total Difference"])
+    )
 
     def to_lot(x):
         return None if x is None else x / 1000.0
@@ -401,9 +479,9 @@ def get_verified_stock_days(code: str, needed: int, end_day: date):
     while len(out) < needed and tries < 260:
         tries += 1
         if is_trading_day(cursor):
-            row = fetch_stock_row(cursor, code)
+            row, source_type = fetch_stock_row(cursor, code)
             if row is not None:
-                out.append({"date": cursor, "stock": row})
+                out.append({"date": cursor, "stock": row, "source": source_type})
         cursor -= timedelta(days=1)
 
     return list(reversed(out))
@@ -436,7 +514,7 @@ st.caption("輸入股票代號，先看完重點再決定要不要下單。")
 
 with st.sidebar:
     st.header("🔧 參數")
-    stock_code = st.text_input("股票代號", value="2330")
+    stock_code = st.text_input("股票代號", value="0050")
     end_day = st.date_input("截至日期", value=datetime.now(TZ).date())
     stop_loss_pct = st.number_input("當沖停損 %", min_value=0.1, max_value=20.0, value=1.0, step=0.1)
     entry_price = st.number_input("預計進場價（可選）", min_value=0.0, value=0.0, step=0.5)
@@ -455,14 +533,14 @@ if st.button("開始檢查"):
     warnings = []
 
     if len(stock_days) == 0:
-        st.error("查不到這檔股票資料，請確認股票代號是否正確，或這檔不是上市股。")
+        st.error("查不到這檔資料，請確認代號是否正確，或這檔不是 TWSE 可查的標的。")
         st.stop()
 
     if len(stock_days) < 5:
         warnings.append(f"目前只抓到 {len(stock_days)} 個交易日，資料不足 5 天，但我先幫你顯示已有內容。")
 
-    # 股票資料
-    stock_hist = [normalize_stock_row(item["date"], item["stock"]) for item in stock_days]
+    # 股票 / ETF 資料
+    stock_hist = [normalize_stock_row(item["date"], item["stock"], item.get("source", "")) for item in stock_days]
     hist_df = pd.DataFrame(stock_hist).sort_values("date").reset_index(drop=True)
 
     for col in ["open", "high", "low", "close", "volume", "trades", "amount"]:
@@ -477,6 +555,7 @@ if st.button("開始檢查"):
     latest_date = latest["date"]
     latest_code = latest.get("code", code)
     latest_name = latest.get("name", "")
+    latest_source = latest.get("source", "")
 
     # 估值資料
     val_date, val_row = get_latest_valuation(code, stock_days)
@@ -535,15 +614,15 @@ if st.button("開始檢查"):
     st.subheader("🔍 一眼檢查")
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("股票代號", str(latest_code))
-    c2.metric("股票名稱", str(latest_name))
-    c3.metric("收盤價", fmt_price(latest.get("close")))
-    c4.metric("漲跌", str(latest.get("change", "-")))
+    c1.metric("代號", str(latest_code))
+    c2.metric("名稱", str(latest_name))
+    c3.metric("類型", "ETF" if latest_source == "ETF" else "上市股票")
+    c4.metric("收盤價", fmt_price(latest.get("close")))
 
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("成交量(股)", fmt_int(latest.get("volume")))
-    c6.metric("MA5", fmt_price(latest.get("MA5")))
-    c7.metric("MA10", fmt_price(latest.get("MA10")))
+    c5.metric("漲跌", str(latest.get("change", "-")))
+    c6.metric("成交量(股)", fmt_int(latest.get("volume")))
+    c7.metric("MA5", fmt_price(latest.get("MA5")))
     c8.metric("MA20", fmt_price(latest.get("MA20")))
 
     c9, c10, c11 = st.columns(3)
@@ -635,7 +714,7 @@ if st.button("開始檢查"):
     # 資料核對
     st.write("### 🧪 資料核對說明")
     st.write(f"- 已驗證的交易日數：`{len(stock_days)}`")
-    st.write(f"- 最新股票資料日：`{str(latest_date)}`")
+    st.write(f"- 最新資料日：`{str(latest_date)}`")
     if val_date is not None:
         st.write(f"- 最新估值資料日：`{str(val_date)}`")
     if not inst_df.empty:
